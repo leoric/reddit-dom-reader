@@ -324,7 +324,7 @@
 
   function topLevelPosts(root) {
     return Array.from(root.querySelectorAll('shreddit-post')).filter(
-      (p) => !(p.parentElement && p.parentElement.closest('shreddit-post'))
+      (p) => !(p.parentElement && p.parentElement.closest('[slot="post-media-container"], [slot="crosspost-container"]'))
     );
   }
 
@@ -468,6 +468,9 @@
       el('a', { href: p.permalink, class: 'orr-comments' }, p.comments + ' comments')
     ));
 
+    const tb = el0.querySelector('[slot="text-body"], shreddit-post-text-body');
+    if (tb && txt(tb)) body.appendChild(el('div', { class: 'orr-preview', html: cleanMd(tb) }));
+
     const media = renderMedia(el0);
     if (media) body.appendChild(media);
     row.appendChild(body);
@@ -477,7 +480,7 @@
   // The feed lazy-loads more posts via <faceplate-partial src="...after=...">.
   // Our hidden native page never scrolls, so we trigger that same-origin
   // partial ourselves from a "next" button and parse the HTML it returns.
-  function findNextPartial(root) {
+  function findNextPartial(root, preferFirst) {
     const all = Array.from(root.querySelectorAll('faceplate-partial[src]'));
     const parts = all.filter((f) => {
       const src = f.getAttribute('src') || '';
@@ -487,8 +490,8 @@
     if (!parts.length && all.length) {
       console.info('[old-reddit-dom-reader] partials seen but none matched:', all.map((f) => f.getAttribute('src')));
     }
-    const last = parts[parts.length - 1];
-    return last ? last.getAttribute('src') : null;
+    const pick = preferFirst ? parts[0] : parts[parts.length - 1];
+    return pick ? pick.getAttribute('src') : null;
   }
 
   // Pinned / "community highlights" posts are not <shreddit-post> elements;
@@ -577,7 +580,7 @@
     const firstCount = addPosts(document);
     if (!firstCount && !pinned.length) throw new Error('no shreddit-post elements found');
 
-    let nextSrc = findNextPartial(document);
+    let nextSrc = findNextPartial(document, true);
     let loading = false;
     const nav = el('div', { class: 'orr-nav' });
     root.appendChild(nav);
@@ -590,8 +593,10 @@
         const res = await fetch(new URL(nextSrc, location.origin + '/').href, { credentials: 'same-origin' });
         if (!res.ok) throw new Error(String(res.status));
         const frag = parseDoc(await res.text());
-        const added = addPosts(frag, true);
-        nextSrc = added ? findNextPartial(frag) : null;
+        const prev = nextSrc;
+        addPosts(frag, true);
+        const nxt = findNextPartial(frag);
+        nextSrc = nxt && nxt !== prev ? nxt : null; // overlapping pages are fine, dedupe skips repeats
       } catch (err) {
         console.error('[old-reddit-dom-reader] load more failed', err);
         nextSrc = null;
@@ -621,7 +626,7 @@
 
     // the SSR'd page only has a few posts, so pre-fill up to ~25 right away
     (async function prefill() {
-      for (let i = 0; i < 4 && nextSrc && list.children.length < 25; i++) {
+      for (let i = 0; i < 6 && nextSrc && list.children.length < 25; i++) {
         await loadMore();
       }
     })();
@@ -761,6 +766,9 @@
       .orr-gallery { display:flex; flex-wrap:wrap; gap:6px; }
       .orr-gallery-img { max-width:300px; max-height:300px; border-radius:3px; }
       .orr-note { color:#aaa; font-size:11px; margin-top:2px; }
+      .orr-preview { margin-top:6px; max-width:720px; max-height:7.5em; overflow:hidden; color:#444; overflow-wrap:anywhere;
+        -webkit-mask-image:linear-gradient(#000 70%, transparent); mask-image:linear-gradient(#000 70%, transparent); }
+      .orr-preview p { margin:0 0 6px; }
       .orr-nav { padding:14px; text-align:center; }
       button.orr-next { background:none; border:0; padding:4px 8px; color:#0b6b9c; font-size:13px; cursor:pointer; }
       button.orr-next:hover { text-decoration:underline; }
