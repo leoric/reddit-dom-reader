@@ -38,11 +38,16 @@ tiny old-reddit thumbnails.
   search, user pages, etc.) are left completely alone.
 - Escape hatch: add `?orr=off` to any URL, or click "view original
   reddit.com" in the header, to see the normal page.
+- Voting works by clicking reddit's own (hidden) vote buttons on your
+  behalf, so reddit's page handles the session/CSRF side. You need to be
+  logged in on reddit.com. Posts loaded with "load more" are moved into a
+  hidden container in the live page so their vote buttons exist too.
 
 ## What it doesn't do
 
-- No voting — that needs reddit's internal CSRF/session flow, which is out
-  of scope for a userscript.
+- Voting depends on finding reddit's vote buttons in its current markup. If
+  reddit changes it, the arrows dim and voting is unavailable until the
+  selectors are updated.
 - reddit-hosted videos only have audio in browsers with native HLS support
   (Safari). Elsewhere (e.g. Firefox) you get the video-only mp4, because
   reddit serves video and audio as separate streams and muxing them back

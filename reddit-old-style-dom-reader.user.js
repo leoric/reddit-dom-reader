@@ -328,6 +328,94 @@
     );
   }
 
+  // ---------- voting (proxied through reddit's own buttons) ----------
+  // We don't talk to reddit's API. Each row keeps a reference to the live
+  // <shreddit-post>/<shreddit-comment> behind the hidden page, finds its real
+  // upvote/downvote buttons (they live in open shadow roots) and clicks them,
+  // so reddit's own code sends the request with its own session/CSRF handling.
+  const ENABLE_VOTING = true;
+
+  function voteButtons(host) {
+    let up = null, down = null;
+    const hostTag = host.tagName;
+    const queue = [host];
+    while (queue.length && !(up && down)) {
+      const node = queue.shift();
+      const roots = [node];
+      if (node.shadowRoot) roots.push(node.shadowRoot);
+      for (const r of roots) {
+        for (const ch of Array.from(r.children || [])) {
+          if (ch.tagName === hostTag && ch !== host) continue; // nested comment / crosspost
+          const label = (ch.getAttribute('aria-label') || '').trim();
+          if (ch.tagName === 'BUTTON' || ch.getAttribute('role') === 'button') {
+            if (!up && (ch.hasAttribute('upvote') || /^upvote$/i.test(label))) up = ch;
+            else if (!down && (ch.hasAttribute('downvote') || /^downvote$/i.test(label))) down = ch;
+          }
+          queue.push(ch);
+        }
+      }
+    }
+    return { up, down };
+  }
+
+  function attachVoting(nativeEl, scoreNode, baseScore, suffix) {
+    const base = baseScore == null || baseScore === '' ? NaN : Number(baseScore);
+    suffix = suffix || '';
+    let state0 = null; // our vote when we first saw it (the score attr already includes it)
+    let state = 0;
+    const upBtn = el('button', { type: 'button', class: 'orr-vote orr-up', title: 'upvote' }, '\u25B2');
+    const downBtn = el('button', { type: 'button', class: 'orr-vote orr-down', title: 'downvote' }, '\u25BC');
+
+    function read() {
+      const b = voteButtons(nativeEl);
+      if (!b.up || !b.down) return null;
+      const pressed = (x) => x.getAttribute('aria-pressed') === 'true';
+      return { b, state: pressed(b.up) ? 1 : pressed(b.down) ? -1 : 0 };
+    }
+    function paint() {
+      upBtn.classList.toggle('orr-on', state === 1);
+      downBtn.classList.toggle('orr-on', state === -1);
+      if (!isNaN(base) && state0 !== null) scoreNode.textContent = formatScore(base - state0 + state) + suffix;
+    }
+    function unavailable() {
+      [upBtn, downBtn].forEach((b) => {
+        b.classList.add('orr-vote-na');
+        b.title = "voting unavailable (couldn't find reddit's vote buttons \u2013 are you logged in?)";
+      });
+    }
+    async function vote(dir) {
+      const r = read();
+      if (!r) return unavailable();
+      if (state0 === null) { state0 = state = r.state; }
+      (dir > 0 ? r.b.up : r.b.down).click();
+      await sleep(250);
+      const r2 = read();
+      state = r2 ? r2.state : state === dir ? 0 : dir;
+      paint();
+    }
+    upBtn.addEventListener('click', () => vote(1));
+    downBtn.addEventListener('click', () => vote(-1));
+
+    // show an already-cast vote once reddit's buttons have rendered
+    setTimeout(() => { const r = read(); if (r) { state0 = state = r.state; paint(); } }, 1000);
+
+    return { up: upBtn, down: downBtn };
+  }
+
+  function voteCol(nativeEl, score) {
+    const col = el('div', { class: 'orr-votecol' });
+    const sc = el('div', { class: 'orr-score' }, formatScore(score));
+    if (ENABLE_VOTING && nativeEl) {
+      const v = attachVoting(nativeEl, sc, score, '');
+      col.appendChild(v.up);
+      col.appendChild(sc);
+      col.appendChild(v.down);
+    } else {
+      col.appendChild(sc);
+    }
+    return col;
+  }
+
   // ---------- header ----------
   function headerBar(withSort) {
     const bar = el('div', { class: 'orr-header' });
@@ -358,7 +446,7 @@
   function renderPostRow(el0) {
     const p = readPost(el0);
     const row = el('div', { class: 'orr-row' });
-    row.appendChild(el('div', { class: 'orr-votecol' }, el('div', { class: 'orr-score' }, formatScore(p.score))));
+    row.appendChild(voteCol(el0, p.score));
     const body = el('div', { class: 'orr-body' });
 
     if (p.flair) body.appendChild(el('span', { class: 'orr-flair' }, p.flair));
@@ -467,12 +555,17 @@
     root.appendChild(list);
 
     const seen = new Set();
-    function addPosts(src) {
+    // posts fetched via 'load more' are inert (DOMParser). Moving them into a hidden
+    // container in the live document upgrades them, so their vote buttons work.
+    const holder = el('div', { id: 'orr-live' });
+    document.body.appendChild(holder);
+    function addPosts(src, live) {
       let n = 0;
       for (const p of topLevelPosts(src)) {
         const key = p.getAttribute('id') || p.getAttribute('permalink');
         if (key && seen.has(key)) continue;
         if (key) seen.add(key);
+        if (live && ENABLE_VOTING) holder.appendChild(p);
         list.appendChild(renderPostRow(p));
         n++;
       }
@@ -497,7 +590,7 @@
         const res = await fetch(new URL(nextSrc, location.origin + '/').href, { credentials: 'same-origin' });
         if (!res.ok) throw new Error(String(res.status));
         const frag = parseDoc(await res.text());
-        const added = addPosts(frag);
+        const added = addPosts(frag, true);
         nextSrc = added ? findNextPartial(frag) : null;
       } catch (err) {
         console.error('[old-reddit-dom-reader] load more failed', err);
@@ -543,14 +636,20 @@
     const bodyEl = c.querySelector(':scope > [slot="comment"]') || c.querySelector('[slot="comment"]');
 
     const wrap = el('div', { class: 'orr-comment' });
+    const hasScore = !(scoreRaw == null || scoreRaw === '');
+    const scoreSpan = el('span', { class: 'orr-score' }, hasScore ? formatScore(scoreRaw) + ' points' : '');
+    const votes = ENABLE_VOTING ? attachVoting(c, scoreSpan, scoreRaw, ' points') : null;
     const head = el('div', {
       class: 'orr-comment-head',
-      onclick: (e) => { if (e.target.closest('a')) return; wrap.classList.toggle('orr-collapsed'); },
+      onclick: (e) => { if (e.target.closest('a,button')) return; wrap.classList.toggle('orr-collapsed'); },
     },
       el('span', { class: 'orr-collapse-toggle' }, '[\u2013] '),
+      votes ? votes.up : null,
+      votes ? votes.down : null,
+      ' ',
       el('a', { href: 'https://www.reddit.com/user/' + author, class: 'orr-user' }, author),
       ' ',
-      el('span', { class: 'orr-score' }, scoreRaw == null || scoreRaw === '' ? '' : formatScore(scoreRaw) + ' points'),
+      scoreSpan,
       ' ',
       el('span', { class: 'orr-time' }, formatAgo(created))
     );
@@ -571,7 +670,7 @@
     root.appendChild(headerBar(false));
 
     const postBox = el('div', { class: 'orr-postbox' });
-    postBox.appendChild(el('div', { class: 'orr-votecol' }, el('div', { class: 'orr-score' }, formatScore(p.score))));
+    postBox.appendChild(voteCol(postEl, p.score));
     const pbody = el('div', { class: 'orr-body' });
     if (p.flair) pbody.appendChild(el('span', { class: 'orr-flair' }, p.flair));
     pbody.appendChild(el('a', {
@@ -639,6 +738,12 @@
       .orr-row:hover { background:#f8f9fa; }
       .orr-votecol { width:40px; flex:0 0 40px; text-align:center; padding-top:2px; }
       .orr-score { color:#878a8c; font-weight:bold; font-size:12px; }
+      .orr-vote { display:block; margin:0 auto; background:none; border:0; padding:1px 6px; color:#c6c6c6; font-size:12px; line-height:1.1; cursor:pointer; }
+      .orr-vote:hover { color:#888; }
+      .orr-up.orr-on { color:#ff4500; }
+      .orr-down.orr-on { color:#7193ff; }
+      .orr-vote-na { opacity:0.35; cursor:not-allowed; }
+      .orr-comment-head .orr-vote { display:inline-block; padding:0 3px; }
       .orr-body { flex:1; min-width:0; }
       .orr-title { font-size:16px; color:#222 !important; }
       .orr-title-big { font-size:20px; }
